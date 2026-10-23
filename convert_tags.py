@@ -83,7 +83,11 @@ MP3 Tag Converter: Windows-1251 → UTF-8  (v6)
           Применяем исправления.
 """
 
+from __future__ import annotations
+
 import sys
+import os
+import shutil
 import argparse
 import logging
 from pathlib import Path
@@ -250,6 +254,8 @@ def decode_cp1251_text(text: str, min_confidence: float = 0.5) -> str | None:
       2. chardet должен определить cp1251 с достаточной уверенностью
       3. После перекодировки должна появиться кириллица (U+0400..U+04FF)
     """
+    if text.isascii():
+        return None
     try:
         raw = text.encode("latin-1")
     except (UnicodeEncodeError, UnicodeDecodeError):
@@ -420,6 +426,15 @@ def process_tags(filepath: Path, dry_run: bool, logger: logging.Logger) -> dict:
 
         if not dry_run:
             try:
+                # Keep an exact original before the first write. Never overwrite it.
+                backup = filepath.with_name(filepath.name + ".tag-backup")
+                if backup.exists():
+                    raise FileExistsError(f"Backup already exists: {backup}")
+                with backup.open("xb") as target, filepath.open("rb") as source:
+                    shutil.copyfileobj(source, target)
+                    target.flush()
+                    os.fsync(target.fileno())
+                shutil.copystat(filepath, backup)
                 tags.save(str(filepath), v2_version=3)
             except Exception as e:
                 result["error"] = f"Ошибка сохранения тегов: {e}"
@@ -495,7 +510,10 @@ def scan_directory(
     полоса прогресса не ломается строками логов.
     """
     logger.info("🔍 Сканирование каталога...")
-    mp3_files = list(root.rglob("*.mp3"))
+    mp3_files = [p for p in root.rglob("*")
+                 if p.is_file() and not p.is_symlink()
+                 and p.suffix.lower() == ".mp3"
+                 and not any(part.startswith(("@", ".")) for part in p.relative_to(root).parts[:-1])]
     total = len(mp3_files)
 
     logger.info(f"📁 Найдено MP3-файлов: {total}")
@@ -636,7 +654,7 @@ def main():
         sys.exit(1)
 
     root = Path(args.directory).resolve()
-    if not root.exists():
+    if not root.is_dir():
         print(f"❌ Каталог не найден: {root}")
         sys.exit(1)
 
@@ -726,6 +744,9 @@ def main():
     logger.info(f"  ❌ Ошибок            : {stats['errors']}")
     logger.info(f"  Время                : {elapsed:.1f} сек")
     logger.info(f"{'='*60}")
+
+    if stats["errors"]:
+        sys.exit(1)
 
     if args.dry_run and (stats["tags_fixed_files"] > 0 or stats["renamed_files"] > 0):
         logger.info("\n💡 Запустите без --dry-run для применения изменений")
