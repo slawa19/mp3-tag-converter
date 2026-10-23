@@ -25,9 +25,16 @@ def norm(text):
 
 def repair_text(text, context):
     # Only encoding repair, no typography, HTML or whitespace normalization.
-    fixed = ftfy.fix_encoding(text)
+    # Do not apply ftfy's partial/lossy substitutions to CP1251 text.
+    # UTF8 repair must round-trip the ENTIRE original value exactly.
+    fixed = ftfy.fix_encoding(text, restore_byte_a0=False, replace_lossy_sequences=False)
     if fixed != text:
-        return fixed, 'utf8_mojibake'
+        for encoding in ('latin1', 'cp1252'):
+            try:
+                if fixed.encode('utf8').decode(encoding) == text:
+                    return fixed, 'utf8_exact_roundtrip'
+            except UnicodeError:
+                pass
     if text.isascii():
         return text, None
     try:
@@ -48,6 +55,23 @@ def repair_text(text, context):
     return text, 'ambiguous_cp1251:' + candidate
 
 def audio_hash(path):
+    if path.suffix.lower() == '.mp3':
+        # Hash exact MPEG payload bytes, excluding ID3v2/v1 only.
+        # A demuxer's frame recovery can vary when metadata moves.
+        start = ID3(path).size
+        end = path.stat().st_size
+        with path.open('rb') as stream:
+            if end >= 128:
+                stream.seek(end-128)
+                if stream.read(3) == b'TAG': end -= 128
+            stream.seek(start)
+            digest = hashlib.sha256()
+            remaining = end-start
+            while remaining:
+                chunk = stream.read(min(1048576,remaining))
+                if not chunk: raise IOError('Unexpected audio EOF')
+                digest.update(chunk); remaining -= len(chunk)
+        return digest.hexdigest()
     p = subprocess.run(['ffmpeg','-v','error','-i',str(path),'-map','0:a','-c','copy','-f','hash','-hash','sha256','-'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=180)
     if p.returncode or not p.stdout.startswith(b'SHA256='):
         raise RuntimeError('Audio checksum failed: '+p.stderr.decode(errors='replace')[-500:])
@@ -66,10 +90,12 @@ def process(path, root, backup_root, apply, overrides):
             new, reason = repair_text(value,rel)
             override = overrides.get(rel,{}).get(field)
             if override:
-                if value == override['old']:
-                    new,reason = override['new'],'reviewed_override'
-                elif value != override['new']:
-                    raise ValueError('Override precondition mismatch '+field)
+                for rule in (override if isinstance(override,list) else [override]):
+                    if value == rule['old']:
+                        new,reason = rule['new'],'reviewed_override'
+                        break
+                # Other COMM/TXXX frames can share FrameID but have different
+                # languages/descriptions. Never apply a rule to an unrelated value.
             if new != value:
                 result['changes'].append({'field':field,'old':value,'new':new,'reason':reason})
             elif reason:
@@ -109,7 +135,12 @@ def process(path, root, backup_root, apply, overrides):
             backup=backup_root/rel
             backup.parent.mkdir(parents=True,exist_ok=True)
             with backup.open('xb') as out,path.open('rb') as src: shutil.copyfileobj(src,out)
-            shutil.copystat(path,backup)
+            # QNAP extended DOS/ACL attributes may not be settable by this user.
+            # Copy bytes without trying to duplicate security extended attributes.
+            import os, stat
+            source_stat = path.stat()
+            os.chmod(backup, stat.S_IMODE(source_stat.st_mode))
+            os.utime(backup, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
             try:
                 if isinstance(tags,ID3): tags.save(path,v2_version=3)
                 else: media.save()
@@ -118,7 +149,7 @@ def process(path, root, backup_root, apply, overrides):
                 result['audio_verified']=True
                 result['backup']=str(backup)
             except Exception:
-                shutil.copy2(backup,path)
+                shutil.copyfile(backup,path)
                 raise
     except Exception as exc:
         result['error']=str(exc)
@@ -132,6 +163,7 @@ def main():
     ap.add_argument('--backup-root',type=Path)
     ap.add_argument('--overrides',type=Path)
     ap.add_argument('--workers',type=int,default=4)
+    ap.add_argument('--only-paths',type=Path,help='JSON list of reviewed relative paths')
     a=ap.parse_args(); root=a.root.resolve()
     assert root.is_dir()
     if a.apply:
@@ -140,6 +172,10 @@ def main():
         a.backup_root.mkdir(parents=True)
     overrides=json.loads(a.overrides.read_text()) if a.overrides else {}
     files=[p for p in root.rglob('*') if p.is_file() and not p.is_symlink() and p.suffix.lower() in EXTENSIONS and not any(s.startswith(('@','.')) for s in p.relative_to(root).parts[:-1])]
+    if a.only_paths:
+        selected=json.loads(a.only_paths.read_text())
+        files=[root / rel for rel in selected]
+        assert all(root in p.resolve().parents and p.is_file() for p in files)
     stats={'total':len(files),'processed':0,'changed_files':0,'changed_fields':0,'no_tags':0,'errors':0,'suspect_files':0,'audio_verified':0,'apply':a.apply}
     a.report.parent.mkdir(parents=True,exist_ok=True)
     with a.report.open('w',encoding='utf8') as out, concurrent.futures.ThreadPoolExecutor(max_workers=a.workers) as pool:

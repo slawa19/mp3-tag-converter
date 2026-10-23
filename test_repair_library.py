@@ -13,6 +13,10 @@ class Tests(unittest.TestCase):
   for good in ['Ætli Það Sé Óhollt Að Láta Sig Dreyma','Beyoncé','Sigur Rós','Привіт світе','One For The Road']:
    self.assertEqual(r.repair_text(good,'music/'+good)[0],good)
   self.assertEqual(r.repair_text('FranÃ§ais','music')[0],'Français')
+  for text in ['В доме восемь... (1991)','Ты уйдёшь (1991)']:
+   self.assertEqual(r.repair_text(text.encode('cp1251').decode('latin1'),text)[0],text)
+  # No partial replacement of CP1251 fragments by UTF8 guessing.
+  self.assertEqual(r.repair_text('Vocals  Cecilia Nordlund','music')[0],'Vocals  Cecilia Nordlund')
  def test_all_text_fields(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp); p=root/'Квартет Гетьман.mp3'; tags=ID3()
