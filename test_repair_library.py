@@ -40,6 +40,32 @@ class Tests(unittest.TestCase):
    self.assertEqual(str(ID3(p)['TIT2']),'Квартет Гетьман')
    self.assertEqual(ID3(p).getall('APIC')[0].data,b'raw-picture')
    self.assertFalse(r.process(p,root,None,False,{})['changes'])
+   # Bound ID3 padding: large automatic padding can break FFmpeg probing even
+   # though the MPEG byte payload is unchanged (production regression).
+   compact=root/'padding-check.mp3'
+   import shutil
+   shutil.copyfile(p,compact)
+   ID3(compact).save(compact,v2_version=3,padding=lambda info:0)
+   self.assertEqual(p.stat().st_size-compact.stat().st_size,1024)
+   self.assertTrue(applied['playability_verified'])
    import shutil
    shutil.rmtree(backup)
+ def test_probe_failure_rolls_back(self):
+  from unittest.mock import patch
+  import subprocess
+  with tempfile.TemporaryDirectory() as tmp:
+   base=Path(tmp); root=base/'music'; root.mkdir(); p=root/'Квартет Гетьман.mp3'
+   subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','anullsrc=r=44100:cl=stereo','-t','0.2',str(p)],check=True)
+   tags=ID3(); tags.add(TIT2(encoding=0,text=['Квартет Гетьман'.encode('cp1251').decode('latin1')])); tags.save(p)
+   original=p.read_bytes()
+   with patch.object(r,'verify_playable',side_effect=[None,RuntimeError('parser regression')]):
+    result=r.process(p,root,base/'backup',True,{})
+   self.assertIn('parser regression',result['error'])
+   self.assertEqual(p.read_bytes(),original)
+   self.assertFalse(result.get('audio_verified',False))
+ def test_probe_rejects_non_audio(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   p=Path(tmp)/'bad.mp3'; p.write_bytes(b'not an audio file')
+   with self.assertRaisesRegex(RuntimeError,'Audio stream probe failed'):
+    r.verify_playable(p)
 if __name__=='__main__':unittest.main()

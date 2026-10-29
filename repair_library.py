@@ -77,6 +77,13 @@ def audio_hash(path):
         raise RuntimeError('Audio checksum failed: '+p.stderr.decode(errors='replace')[-500:])
     return p.stdout.decode().strip()
 
+def verify_playable(path):
+    # Exact payload equality alone cannot detect demuxer regressions caused by
+    # ID3 layout/padding. Require FFmpeg to recognize an audio stream as well.
+    probe = subprocess.run(['ffmpeg','-v','error','-i',str(path),'-map','0:a:0','-t','0','-f','null','-'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=120)
+    if probe.returncode:
+        raise RuntimeError('Audio stream probe failed: '+probe.stderr.decode(errors='replace')[-1500:])
+
 def process(path, root, backup_root, apply, overrides):
     rel = str(path.relative_to(root))
     result = {'path':rel,'changes':[],'suspects':[]}
@@ -131,6 +138,7 @@ def process(path, root, backup_root, apply, overrides):
                         if isinstance(getattr(value,'value',None),str):
                             value.value=fix(value.value,str(key))
         if apply and result['changes']:
+            verify_playable(path)
             before=audio_hash(path)
             backup=backup_root/rel
             backup.parent.mkdir(parents=True,exist_ok=True)
@@ -142,11 +150,13 @@ def process(path, root, backup_root, apply, overrides):
             os.chmod(backup, stat.S_IMODE(source_stat.st_mode))
             os.utime(backup, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
             try:
-                if isinstance(tags,ID3): tags.save(path,v2_version=3)
+                if isinstance(tags,ID3): tags.save(path,v2_version=3,padding=lambda info:1024)
                 else: media.save()
                 after=audio_hash(path)
                 if before != after: raise ValueError('Audio checksum changed')
+                verify_playable(path)
                 result['audio_verified']=True
+                result['playability_verified']=True
                 result['backup']=str(backup)
             except Exception:
                 shutil.copyfile(backup,path)

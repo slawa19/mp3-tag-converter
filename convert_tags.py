@@ -435,7 +435,7 @@ def process_tags(filepath: Path, dry_run: bool, logger: logging.Logger) -> dict:
                     target.flush()
                     os.fsync(target.fileno())
                 shutil.copystat(filepath, backup)
-                tags.save(str(filepath), v2_version=3)
+                tags.save(str(filepath), v2_version=3, padding=lambda info: 1024)
             except Exception as e:
                 result["error"] = f"Ошибка сохранения тегов: {e}"
                 result["modified"] = False
